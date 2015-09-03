@@ -70,6 +70,7 @@ public class Dumper implements AutoCloseable
         // build script
         this.writeSchemaBuildScript(name, functions, tables, types, new File(schemaDir, "create.sh"));
         this.writeBuildAllScript(new File(outDir, "create_all.sh"));
+        this.writeBuildUtilScript(new File(outDir, "util.sh"));
     }
     
     private void writeSchemaBuildScript(String name, List<File> functions, List<File> tables, List<File> types, File to) throws IOException
@@ -77,34 +78,29 @@ public class Dumper implements AutoCloseable
         try (Writer out = new BufferedWriter(new FileWriter(to)))
         {
             out.write("#!/bin/sh\n");
-            out.write("# Build " + name + " schema\n\n");
+            out.write("source ../util.sh\n");
             out.write("# Create schema, executing this script will output the SQL schema to stdout\n\n");
-            out.write("echo \"/* Create " + name + " */\"\n");
-            out.write("if [ \"$IN_TRANS\" != \"yes\" ]; then\n");
-            out.write("echo \"BEGIN;\"\n");
-            out.write("fi\n\n");
+            out.write("begin\n");
             out.write("cat ./create.sql\n\n");
             out.write("# Tables\n");
             for (File table : tables)
             {
-                out.write("cat ./tables/" + table.getName() + "\n");    
+                out.write("cat \"./tables/" + table.getName() + "\"\n");    
             }
             out.write("\n");
             out.write("# Types\n");
             for (File type : types)
             {
-                out.write("cat ./types/" + type.getName() + "\n");    
+                out.write("cat \"./types/" + type.getName() + "\"\n");    
             }
             out.write("\n");
             out.write("# Functions\n");
             for (File function : functions)
             {
-                out.write("cat ./functions/" + function.getName() + "\n");    
+                out.write("cat \"./functions/" + function.getName() + "\"\n");
             }
             out.write("\n");
-            out.write("if [ \"$IN_TRANS\" != \"yes\" ]; then\n");
-            out.write("echo \"COMMIT;\"\n");
-            out.write("fi\n\n");
+            out.write("commit\n");
         }
     }
     
@@ -123,11 +119,32 @@ public class Dumper implements AutoCloseable
         }
     }
     
+    private void writeBuildUtilScript(File to) throws IOException
+    {
+        try (Writer out = new BufferedWriter(new FileWriter(to)))
+        {
+            out.write("#!/bin/sh\n");
+            out.write("\n");
+            out.write("function begin {\n");
+            out.write("  if [ \"$IN_TRANS\" != \"yes\" ]; then\n");
+            out.write("    echo \"BEGIN;\"\n");
+            out.write("  fi\n");
+            out.write("}\n");
+            out.write("\n");
+            out.write("function commit {\n");
+            out.write("  if [ \"$IN_TRANS\" != \"yes\" ]; then\n");
+            out.write("    echo \"COMMIT;\"\n");
+            out.write("  fi\n");
+            out.write("}\n");
+            out.write("\n");
+        }
+    }
+    
     private void writeCreateSchema(String name, String owner, File to) throws SQLException, IOException
     {
         try (Writer fw = new BufferedWriter(new FileWriter(to)))
         {
-            fw.write("CREATE SCHEMA " + name + " AUTHORIZATION " + owner + ";\n\n");
+            fw.write("CREATE SCHEMA IF NOT EXISTS" + name + " AUTHORIZATION " + owner + ";\n\n");
         }
     }
     
@@ -157,10 +174,10 @@ public class Dumper implements AutoCloseable
     {
         try (Writer writer = new BufferedWriter(new FileWriter(to)))
         {
-            writer.write("CREATE TABLE \"" + schema + "\".\"" + table + "\" (\n");
+            writer.write("CREATE TABLE IF NOT EXISTS \"" + schema + "\".\"" + table + "\" (\n");
             boolean ns = false;
             // get the columns
-            try (PreparedStatement stmt = this.connection.prepareStatement("SELECT a.attnum, quote_ident(a.attname), format_type(a.atttypid, NULL) FROM pg_class c JOIN pg_namespace n ON (n.oid = c.relnamespace) JOIN pg_attribute a ON (a.attrelid = c.oid) WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 ORDER BY a.attnum"))
+            try (PreparedStatement stmt = this.connection.prepareStatement("SELECT a.attnum, quote_ident(a.attname), format_type(a.atttypid, a.atttypmod) FROM pg_class c JOIN pg_namespace n ON (n.oid = c.relnamespace) JOIN pg_attribute a ON (a.attrelid = c.oid) WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 ORDER BY a.attnum"))
             {
                 stmt.setString(1, schema);
                 stmt.setString(2, table);
@@ -296,7 +313,7 @@ public class Dumper implements AutoCloseable
             writer.write("CREATE TYPE \"" + schema + "\".\"" + type + "\" AS (\n");
             boolean ns = false;
             // get the columns
-            try (PreparedStatement stmt = this.connection.prepareStatement("SELECT a.attnum, quote_ident(a.attname), format_type(a.atttypid, NULL) FROM pg_type t JOIN pg_namespace n ON (n.oid = t.typnamespace) JOIN pg_class c ON (t.typrelid = c.oid) JOIN pg_attribute a ON (a.attrelid = c.oid) WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 ORDER BY a.attnum"))
+            try (PreparedStatement stmt = this.connection.prepareStatement("SELECT a.attnum, quote_ident(a.attname), format_type(a.atttypid, a.atttypmod) FROM pg_type t JOIN pg_namespace n ON (n.oid = t.typnamespace) JOIN pg_class c ON (t.typrelid = c.oid) JOIN pg_attribute a ON (a.attrelid = c.oid) WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 ORDER BY a.attnum"))
             {
                 stmt.setString(1, schema);
                 stmt.setString(2, type);
