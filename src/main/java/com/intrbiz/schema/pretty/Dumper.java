@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class Dumper implements AutoCloseable
 {    
@@ -55,11 +56,13 @@ public class Dumper implements AutoCloseable
         File tablesDir    = new File(schemaDir, "tables");
         File typesDir     = new File(schemaDir, "types");
         File functionsDir = new File(schemaDir, "functions");
+        File triggersDir = new File(schemaDir, "triggers");
         // create dirs
         schemaDir.mkdirs();
         tablesDir.mkdirs();
         typesDir.mkdirs();
         functionsDir.mkdirs();
+        triggersDir.mkdirs();
         // dump the schema
         // create schema
         this.writeCreateSchema(name, owner, new File(schemaDir, "create.sql"));
@@ -67,38 +70,49 @@ public class Dumper implements AutoCloseable
         List<File> tables    = this.dumpTables(name, tablesDir);
         List<File> types     = this.dumpTypes(name, typesDir);
         List<File> functions = this.dumpFunctions(name, functionsDir);
+        List<File> triggers  = this.dumpTriggers(name, triggersDir);
         // build script
-        this.writeSchemaBuildScript(name, functions, tables, types, new File(schemaDir, "create.sh"));
-        this.writeBuildAllScript(new File(outDir, "create_all.sh"));
-        this.writeBuildUtilScript(new File(outDir, "util.sh"));
+        this.writeSchemaBuildScript(name, functions, tables, types, triggers, new File(schemaDir, "create.sh"));
+        //this.writeBuildAllScript(new File(outDir, "create_all.sh"));
+        //this.writeBuildUtilScript(new File(outDir, "util.sh"));
     }
     
-    private void writeSchemaBuildScript(String name, List<File> functions, List<File> tables, List<File> types, File to) throws IOException
+    private void writeSchemaBuildScript(String name, List<File> functions, List<File> tables, List<File> types, List<File> triggers, File to) throws IOException
     {
         try (Writer out = new BufferedWriter(new FileWriter(to)))
         {
-            out.write("#!/bin/sh\n");
+            out.write("#!/bin/bash\n");
             out.write("source ../util.sh\n");
             out.write("# Create schema, executing this script will output the SQL schema to stdout\n\n");
             out.write("begin\n");
-            out.write("cat ./create.sql\n\n");
+            out.write("say \"Creating schema " + name + "\"\n");
+            out.write("include \"create.sql\"\n\n");
             out.write("# Tables\n");
-            for (File table : tables)
+            for (String table : tables.stream().map((f) -> f.getName().replace(".sql", "")).sorted().collect(Collectors.toList()))
             {
-                out.write("cat \"./tables/" + table.getName() + "\"\n");    
+                out.write("include_table \"" + table + "\"\n");    
             }
             out.write("\n");
             out.write("# Types\n");
-            for (File type : types)
+            for (String type : types.stream().map((f) -> f.getName().replace(".sql", "")).sorted().collect(Collectors.toList()))
             {
-                out.write("cat \"./types/" + type.getName() + "\"\n");    
+                out.write("include_type \"" + type + "\"\n");    
             }
             out.write("\n");
             out.write("# Functions\n");
-            for (File function : functions)
+            for (String function : functions.stream().map((f) -> f.getName().replace(".sql", "")).sorted().collect(Collectors.toList()))
             {
-                out.write("cat \"./functions/" + function.getName() + "\"\n");
+                out.write("include_function \"" + function + "\"\n");
             }
+            out.write("\n");
+            out.write("# Triggers\n");
+            for (String trigger : triggers.stream().map((f) -> f.getName().replace(".sql", "")).sorted().collect(Collectors.toList()))
+            {
+                out.write("include_trigger \"" + trigger + "\"\n");
+            }
+            out.write("\n");
+            out.write("# Testing testing testing\n");
+            out.write("test\n");
             out.write("\n");
             out.write("commit\n");
         }
@@ -144,7 +158,7 @@ public class Dumper implements AutoCloseable
     {
         try (Writer fw = new BufferedWriter(new FileWriter(to)))
         {
-            fw.write("CREATE SCHEMA IF NOT EXISTS" + name + " AUTHORIZATION " + owner + ";\n\n");
+            fw.write("CREATE SCHEMA IF NOT EXISTS " + name + " AUTHORIZATION " + "myenergy" + ";\n\n");
         }
     }
     
@@ -224,7 +238,7 @@ public class Dumper implements AutoCloseable
                 }
             }
             writer.write(";\n\n");
-            writer.write("ALTER TABLE \"" + schema + "\".\"" + table + "\" OWNER TO " + owner + ";\n\n");
+            writer.write("ALTER TABLE \"" + schema + "\".\"" + table + "\" OWNER TO " + "myenergy" + ";\n\n");
             // indexes
             try (PreparedStatement stmt = this.connection.prepareStatement("SELECT n2.nspname, c2.relname, pg_get_indexdef(c2.oid) FROM pg_index i JOIN pg_class c2 ON (i.indexrelid = c2.oid AND c2.relkind = 'i') JOIN pg_namespace n2 ON (c2.relnamespace = n2.oid) JOIN pg_class c1 ON (i.indrelid = c1.oid) JOIN pg_namespace n1 ON (c1.relnamespace = n1.oid) LEFT JOIN pg_constraint con ON (c2.oid = con.conindid) WHERE con.conname IS NULL AND n1.nspname = ? AND c1.relname = ?"))
             {
@@ -238,6 +252,42 @@ public class Dumper implements AutoCloseable
                     }
                 }
             }
+        }
+    }
+    
+    public List<File> dumpTriggers(String schema, File outDir) throws SQLException, IOException
+    {
+        List<File> files = new LinkedList<File>();
+        try (PreparedStatement stmt = this.connection.prepareStatement("SELECT c.relname, pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON (n.oid = c.relnamespace) WHERE n.nspname = ? AND c.relkind = 'r' AND c.relpersistence = 'p'"))
+        {
+            stmt.setString(1, schema);
+            try (ResultSet rs = stmt.executeQuery())
+            {
+                while (rs.next())
+                {
+                    String name = rs.getString(1);
+                    String owner = rs.getString(2);
+                    // dump the table
+                    File triggerFile = new File (outDir, name + ".sql");
+                    if (this.dumpTrigger(schema, name, owner, triggerFile))
+                    {
+                        files.add(triggerFile);
+                    }
+                    else
+                    {
+                        triggerFile.delete();
+                    }
+                }
+            }
+        }
+        return files;
+    }
+    
+    public boolean dumpTrigger(String schema, String table, String owner, File to) throws SQLException, IOException
+    {
+        boolean ret = false;
+        try (Writer writer = new BufferedWriter(new FileWriter(to)))
+        {
             // triggers
             try (PreparedStatement stmt = this.connection.prepareStatement("SELECT t.tgname, pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class r ON (t.tgrelid = r.oid) JOIN pg_namespace n ON (r.relnamespace = n.oid) WHERE (NOT t.tgisinternal) AND n.nspname = ? AND r.relname = ?"))
             {
@@ -248,16 +298,18 @@ public class Dumper implements AutoCloseable
                     while (rs.next())
                     {
                         writer.write(rs.getString(2) + ";\n\n");
+                        ret = true;
                     }
                 }
             }
         }
+        return ret;
     }
     
     public List<File> dumpFunctions(String schema, File to) throws SQLException, IOException
     {
         List<File> files = new LinkedList<File>();
-        try (PreparedStatement stmt = this.connection.prepareStatement("SELECT pg_get_functiondef(p.oid), p.proname, (SELECT string_agg((SELECT t.typname FROM pg_type t WHERE t.oid = u.v), '_') AS argtypes FROM unnest(p.proargtypes) u(v)), pg_get_userbyid(p.proowner), pg_get_function_identity_arguments(p.oid)  FROM pg_proc p JOIN pg_namespace n ON (p.pronamespace = n.oid) WHERE n.nspname = ?"))
+        try (PreparedStatement stmt = this.connection.prepareStatement("SELECT pg_get_functiondef(p.oid), p.proname, (SELECT string_agg((SELECT t.typname FROM pg_type t WHERE t.oid = u.v), '_') AS argtypes FROM unnest(p.proargtypes) u(v)), pg_get_userbyid(p.proowner), pg_get_function_identity_arguments(p.oid)  FROM pg_proc p JOIN pg_language l ON (p.prolang = l.oid) JOIN pg_namespace n ON (p.pronamespace = n.oid) WHERE n.nspname = ? AND l.lanname <> 'plv8'"))
         {
             stmt.setString(1, schema);
             try (ResultSet rs = stmt.executeQuery())
@@ -271,11 +323,10 @@ public class Dumper implements AutoCloseable
                     String idargs = rs.getString(5);
                     // write out the def
                     File functionFile = new File (to, name + (args == null ? "" : "_" + args) + ".sql");
-                    files.add(functionFile);
                     try (Writer fw = new BufferedWriter(new FileWriter(functionFile)))
                     {
                         fw.write(def + ";\n\n");
-                        fw.write("ALTER FUNCTION " + schema + "." + name + "(" + idargs + ") OWNER TO " + owner + ";\n\n");
+                        fw.write("ALTER FUNCTION \"" + schema + "\".\"" + name + "\"(" + idargs + ") OWNER TO " + "myenergy" + ";\n\n");
                     }
                     files.add(functionFile);
                 }
@@ -331,7 +382,7 @@ public class Dumper implements AutoCloseable
             }
             // end table
             writer.write("\n);\n\n");
-            writer.write("ALTER TYPE \"" + schema + "\".\"" + type + "\" OWNER TO " + owner + ";\n\n");
+            writer.write("ALTER TYPE \"" + schema + "\".\"" + type + "\" OWNER TO " + "myenergy" + ";\n\n");
         }
     }
     
